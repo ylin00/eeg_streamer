@@ -6,109 +6,39 @@ Streaming EEG raw signal to remote Kafka server.
 
 Author:
     Yanxian Lin, Insight Health Data Science Fellow, Boston 2020
-
-
-Prerequisites
--------------
-
-make sure you have started zookeeper server and kafka broker server
-Step 1 and Step 2 in https://kafka.apache.org/quickstart
-0. download kafka from apache.org, unzip using ```tar -xvf XXX```
-1. run ```bin/zookeeper-server-start.sh config/zookeeper.properties```
-2. run ```bin/kafka-server-start.sh config/server.properties```
-
-
-Usage
------
-```Python3 EEGStreamer.py```
-
 """
+
+import argparse
 import ast
+import sys
+
 from confluent_kafka import Producer, Consumer, KafkaError
 from time import time, sleep
 from datetime import datetime
 import numpy as np
-
 import configparser
 
-config = configparser.ConfigParser()
-config.read('config.ini')
-KALFK_BROKER_ADDRESS = config['DEFAULT']['KALFK_BROKER_ADDRESS']
-STREAMER_TOPIC = config['DEFAULT']['STREAMER_TOPIC']
-CONSUMER_TOPIC = config['DEFAULT']['CONSUMER_TOPIC']
-
-
-DEBUG = 1
-"""Debug mode"""
-
-# # asynchronous writes
-# def acked(err, msg):
-#     if err is not None:
-#         print(f"Failed to deliver message: {str(msg)}: {str(err)}")
-#     else:
-#         print(f"Message produced: {str(msg)}")
-
-
-def decode(key, value):
-    """decode a message key and value and return list"""
-    # TODO: if key is invalid then return None
-    mydata = ast.literal_eval(value.decode("UTF-8"))
-    return mydata['t'], mydata['v']
-
-
-def sleep_and_sync(sampling_delay, sampling_count, wall_clock,
-                   samping_rate, delay_refresh_intv, DEBUG=True):
-    """Sleep and adjust the sampling delay
-
-    Returns:
-        list(float, int, float): sampling_delay, sampling_count,
-            wall_clock
-    """
-    # Adhere to sampling frequency
-    sleep(sampling_delay)
-    sampling_count += 1
-
-    # Adjust the sleeping interval every refresh_delay_interval seconds
-    if sampling_count == (delay_refresh_intv * samping_rate):
-
-        new_heartbeat = time()
-        duration = new_heartbeat - wall_clock
-        deviation = (delay_refresh_intv - duration) * 1000
-
-        try:
-            sampling_delay = sampling_delay + deviation / (
-                    delay_refresh_intv * 1000) / samping_rate * 0.5
-            # 0.5 = dampening factor
-            if sampling_delay < 0:
-                raise ValueError
-        except ValueError:
-            sampling_delay = 0
-            print("WARNING: NEW DELAY TIME INTERVAL WAS A NEGATIVE NUMBER. Setting to 0..")
-        print(f"Deviation: {deviation:.2f} ms, new delay:"
-              f" {sampling_delay * 1000:.2f} ms.") if DEBUG else None
-        sampling_count = 0
-        wall_clock = new_heartbeat
-
-    return sampling_delay, sampling_count, wall_clock
-
-
-# class StreamerOptions:
-#     def __init__(self):
-#         self.max_stream_duration = 1000
-#         """maximum duration in seconds"""
-#         self.streaming_rate = 1
-#         """streaming rate in Hz"""
-#         self.delay_refresh_intv = 1.0
-#         """refresh interval in seconds"""
-#         self.data_shape = [22, 4]  # nchannel x nsamples
-#         """shape of data"""
-#         self.sampling_rate = 40
-#         """data sampling rate in Hz"""
+VERSION = '1.0.1'
 
 
 class EEGStreamer:
-    """"""
+    """EEG Streamer
+
+    Streaming EEG signal to Kafka.
+
+    """
     def __init__(self):
+        # parse arguments
+        args = self.parse_args()
+        self.__verbose = args.verbose
+        self.__infile = args.infile
+        # parse config
+        config = configparser.ConfigParser()
+        config.read(args.config)
+        KALFK_BROKER_ADDRESS = config['DEFAULT']['KALFK_BROKER_ADDRESS']
+        STREAMER_TOPIC = config['DEFAULT']['STREAMER_TOPIC']
+        CONSUMER_TOPIC = config['DEFAULT']['CONSUMER_TOPIC']
+
         # Initialize a Kafka Producer and a consumer
         self.producer = Producer({'bootstrap.servers': KALFK_BROKER_ADDRESS})
         """producer that produce stream of EEG signal"""
@@ -117,12 +47,12 @@ class EEGStreamer:
         """producer_topic of streaming"""
 
         self.consumer = Consumer({
-                'bootstrap.servers': KALFK_BROKER_ADDRESS,
-                'auto.offset.reset': 'earliest',
-                'group.id': 'group',
-                'client.id': 'client',
-                'enable.auto.commit': True,
-                'session.timeout.ms': 6000
+            'bootstrap.servers': KALFK_BROKER_ADDRESS,
+            'auto.offset.reset': 'earliest',
+            'group.id': 'group',
+            'client.id': 'client',
+            'enable.auto.commit': True,
+            'session.timeout.ms': 6000
         })
         """consumer that subscribe the predicted results. Detailed configs 
         can be found https://towardsdatascience.com/kafka-python-explained-in-10-lines-of-code-800e3e07dad1
@@ -171,10 +101,10 @@ class EEGStreamer:
         for istream in range(0, ds.shape[1]):
 
             # Produce signal as stream
-            joint_str = ','.join(['%.6f'%float(ds[ich,istream]) for ich in
+            joint_str = ','.join(['%.6f' % float(ds[ich, istream]) for ich in
                                   range(0, np.shape(ds)[0])])
             timestamp = time()
-            value = "{'t':%.6f,'v':["%float(timestamp)+joint_str+"]}"
+            value = "{'t':%.6f,'v':[" % float(timestamp) + joint_str + "]}"
             self.producer.produce(self.producer_topic, key=montage, value=value)
 
             # Flush
@@ -187,9 +117,8 @@ class EEGStreamer:
             if (stream_count) % max(intv, 1) == 0:
                 self.listen()
 
-            stream_delay, stream_count, heart_beat = sleep_and_sync(
-                stream_delay, stream_count, heart_beat,
-                self.streaming_rate, self.delay_refresh_intv, DEBUG=True)
+            stream_delay, stream_count, heart_beat = self.sleep_and_sync(
+                stream_delay, stream_count, heart_beat)
 
             # too long, shut down
             if time() - start_time > self.max_stream_duration:
@@ -211,9 +140,10 @@ class EEGStreamer:
         if msg is None:
             pass
         elif not msg.error():
-            print('Received message: {0}'.format(msg.value())) if DEBUG else None
+            print(
+                'Received message: {0}'.format(msg.value())) if self.__verbose else None
             # TODO: if msg.key() == XXX
-            t, v = decode(msg.key(), msg.value())
+            t, v = self.decode(msg.key(), msg.value())
             t = datetime.fromtimestamp(int(t))
             # TODO: Check time stamp
             if v[0] == 'pres':
@@ -223,10 +153,10 @@ class EEGStreamer:
             else:
                 print(t, f'UNKNOWN: {v[0]} not recognized')
         elif msg.error().code() == KafkaError._PARTITION_EOF:
-            print('End of partition reached {0}/{1}'\
-                  .format(msg.topic(),msg.partition())) if DEBUG else None
+            print('End of partition reached {0}/{1}' \
+                  .format(msg.topic(), msg.partition())) if self.__verbose else None
         else:
-            print('Error occured: {0}'.format(msg.error().str())) if DEBUG else None
+            print('Error occured: {0}'.format(msg.error().str())) if self.__verbose else None
 
     def stop(self):
         # consume the remaining msg and stop the consumer
@@ -234,6 +164,60 @@ class EEGStreamer:
         self.consumer.close()
         pass
 
+    def parse_args(self):
+        parser = argparse.ArgumentParser(description=self.__doc__ + '\n' + VERSION)
+        parser.add_argument("config", help="config file")
+        parser.add_argument("infile", help="data file to stream from")
+        parser.add_argument("-V", "--version", help="show program version",
+                            action="version", version=VERSION)
+        parser.add_argument("-v", "--verbose",
+                            help="enable verbose mode",
+                            action="store_true")
+        # parser.set_defaults(verbose=False,
+        #                     config='./config.ini',
+        #                     infile='./data/svdemo-3bkg-3pre-3bkg-3pre.txt')
+        return parser.parse_args()
+
+    @staticmethod
+    def decode(key, value):
+        """decode a message key and value and return list"""
+        # TODO: if key is invalid then return None
+        mydata = ast.literal_eval(value.decode("UTF-8"))
+        return mydata['t'], mydata['v']
+
+    def sleep_and_sync(self, sampling_delay, sampling_count, heart_beat):
+        """Sleep and adjust the sampling delay
+
+        Returns: tuple(float, int, float)
+            sampling_delay, sampling_count, heart_beat
+        """
+        # Adhere to sampling frequency
+        sleep(sampling_delay)
+        sampling_count += 1
+
+        # Adjust the sleeping interval every refresh_delay_interval seconds
+        if sampling_count == (self.delay_refresh_intv * self.sampling_rate):
+
+            new_heartbeat = time()
+            duration = new_heartbeat - heart_beat
+            deviation = (self.delay_refresh_intv - duration) * 1000
+
+            try:
+                sampling_delay = sampling_delay + deviation / (
+                        self.delay_refresh_intv * 1000) / self.sampling_rate * 0.5
+                # 0.5 = dampening factor
+                if sampling_delay < 0:
+                    raise ValueError
+            except ValueError:
+                sampling_delay = 0
+                print(
+                    "WARNING: NEW DELAY TIME INTERVAL WAS A NEGATIVE NUMBER. Setting to 0..")
+            print(f"Deviation: {deviation:.2f} ms, new delay:"
+                  f" {sampling_delay * 1000:.2f} ms.") if self.__verbose else None
+            sampling_count = 0
+            heart_beat = new_heartbeat
+
+        return sampling_delay, sampling_count, heart_beat
 
 if __name__ == '__main__':
     eegstreamer = EEGStreamer()
