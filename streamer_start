@@ -1,1 +1,1 @@
-Python3 EEGStreamer.py -v config.ini data/svdemo-3bkg-3pre-3bkg-3pre.txt
+Python3 EEGStreamer.py config.ini data/svdemo-3bkg-3pre-3bkg-3pre.txt
