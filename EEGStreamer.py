@@ -10,7 +10,7 @@ Author:
 
 import argparse
 import ast
-import sys
+from termcolor import colored
 
 from confluent_kafka import Producer, Consumer, KafkaError
 from time import time, sleep
@@ -39,6 +39,12 @@ class EEGStreamer:
         STREAMER_TOPIC = config['DEFAULT']['STREAMER_TOPIC']
         CONSUMER_TOPIC = config['DEFAULT']['CONSUMER_TOPIC']
 
+        if args.id is not None:
+            self.streamer_id = args.id.replace(' ', '_')
+        else:
+            self.streamer_id = config['STREAMER']['STREAMER_ID'].replace(' ', '_')
+            """ID of the streamer"""
+
         # Initialize a Kafka Producer and a consumer
         self.producer = Producer({'bootstrap.servers': KALFK_BROKER_ADDRESS})
         """producer that produce stream of EEG signal"""
@@ -49,7 +55,7 @@ class EEGStreamer:
         self.consumer = Consumer({
             'bootstrap.servers': KALFK_BROKER_ADDRESS,
             'auto.offset.reset': 'earliest',
-            'group.id': 'group',
+            'group.id': self.streamer_id,
             'client.id': 'client',
             'enable.auto.commit': True,
             'session.timeout.ms': 6000
@@ -86,6 +92,9 @@ class EEGStreamer:
     def start(self):
         """Start streaming.
         """
+        # Print a table header
+        print('Time \t \t \t Patient \t Event ')
+
         self.consumer.subscribe([self.consumer_topic])
 
         # read in txt files, fake a stream data
@@ -107,12 +116,12 @@ class EEGStreamer:
             value = "{'t':%.6f,'v':[" % float(timestamp) + joint_str + "]}"
             self.producer.produce(self.producer_topic, key=montage, value=value)
 
-            # Flush
+            # Flush after given interval
             intv = int(self.flush_interval * self.streaming_rate)
             if stream_count % max(intv, 1) == 0:
                 self.producer.flush(1)
 
-            # Listen
+            # Listen after given interval
             intv = int(self.listen_interval * self.streaming_rate)
             if (stream_count) % max(intv, 1) == 0:
                 self.listen()
@@ -140,16 +149,18 @@ class EEGStreamer:
         if msg is None:
             pass
         elif not msg.error():
-            print(
-                'Received message: {0}'.format(msg.value())) if self.__verbose else None
+            print(f"Received message: key={msg.key().decode('utf-8')} val={msg.value()}") if self.__verbose else None
+            if msg.key().decode('utf-8') != 'key':
+                return None
             # TODO: if msg.key() == XXX
             t, v = self.decode(msg.key(), msg.value())
             t = datetime.fromtimestamp(int(t))
             # TODO: Check time stamp
+            # print(msg.key().decode('utf-8'))
             if v[0] == 'pres':
-                print(t, "!!!!!!SEIZURE IS COMING!!!!!!")
+                print(t, "\t", self.streamer_id, "\t", colored("!!!!!!seizure is coming in 10~15 min!!!!!!", 'red'))
             elif v[0] == 'bckg':
-                print(t, "all good")
+                print(t, "\t", self.streamer_id, "\t", "looks all good")
             else:
                 print(t, f'UNKNOWN: {v[0]} not recognized')
         elif msg.error().code() == KafkaError._PARTITION_EOF:
@@ -168,6 +179,7 @@ class EEGStreamer:
         parser = argparse.ArgumentParser(description=self.__doc__ + '\n' + VERSION)
         parser.add_argument("config", help="config file")
         parser.add_argument("infile", help="data file to stream from")
+        parser.add_argument("-id", "--id", help="Streamer identifier")
         parser.add_argument("-V", "--version", help="show program version",
                             action="version", version=VERSION)
         parser.add_argument("-v", "--verbose",
@@ -218,6 +230,7 @@ class EEGStreamer:
             heart_beat = new_heartbeat
 
         return sampling_delay, sampling_count, heart_beat
+
 
 if __name__ == '__main__':
     eegstreamer = EEGStreamer()
