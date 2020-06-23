@@ -93,13 +93,12 @@ class EEGStreamer:
         """Start streaming.
         """
         # Print a table header
-        print('Time \t \t \t Patient \t Event ')
+        print('Time \t \t Patient \t Event ')
 
         self.consumer.subscribe([self.consumer_topic])
 
         # read in txt files, fake a stream data
-        txt_file = './data/svdemo-3bkg-3pre-3bkg-3pre.txt'
-        ds = np.tile(np.loadtxt(txt_file, delimiter=','), [1, 10])
+        ds = np.tile(np.loadtxt(self.__infile, delimiter=','), [1, 10])
         montage = self.montage
 
         start_time = time()
@@ -154,11 +153,11 @@ class EEGStreamer:
                 return None
             # TODO: if msg.key() == XXX
             t, v = self.decode(msg.key(), msg.value())
-            t = datetime.fromtimestamp(int(t))
+            t = datetime.fromtimestamp(int(t)).time().strftime('%I:%M:%S %p')
             # TODO: Check time stamp
             # print(msg.key().decode('utf-8'))
             if v[0] == 'pres':
-                print(t, "\t", self.streamer_id, "\t", colored("!!!!!!seizure is coming in 10~15 min!!!!!!", 'red'))
+                print(t, "\t", self.streamer_id, "\t", colored("!!seizure in 10~15 min!!", 'red'))
             elif v[0] == 'bckg':
                 print(t, "\t", self.streamer_id, "\t", "looks all good")
             else:
