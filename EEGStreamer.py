@@ -12,7 +12,7 @@ import argparse
 import ast
 from termcolor import colored
 
-from confluent_kafka import Producer, Consumer, KafkaError
+from confluent_kafka import Producer, Consumer, KafkaError, TopicPartition, OFFSET_END
 from time import time, sleep
 from datetime import datetime
 import numpy as np
@@ -46,7 +46,11 @@ class EEGStreamer:
             """ID of the streamer"""
 
         # Initialize a Kafka Producer and a consumer
-        self.producer = Producer({'bootstrap.servers': KALFK_BROKER_ADDRESS})
+        self.producer = Producer({
+            'bootstrap.servers': KALFK_BROKER_ADDRESS,
+            'group.id': self.streamer_id+'group',
+            'client.id': self.streamer_id+'client'
+        })
         """producer that produce stream of EEG signal"""
 
         self.producer_topic = STREAMER_TOPIC
@@ -54,10 +58,10 @@ class EEGStreamer:
 
         self.consumer = Consumer({
             'bootstrap.servers': KALFK_BROKER_ADDRESS,
-            'auto.offset.reset': 'earliest',
-            'group.id': self.streamer_id,
-            'client.id': 'client',
-            'enable.auto.commit': True,
+            'auto.offset.reset': 'latest',  # Latest
+            'group.id': self.streamer_id+'group',
+            'client.id': self.streamer_id+'client',
+            'enable.auto.commit': False,  # Never commit
             'session.timeout.ms': 6000
         })
         """consumer that subscribe the predicted results. Detailed configs 
@@ -78,7 +82,7 @@ class EEGStreamer:
         """Flush interval for Producer. In second"""
 
         # Listening related configs
-        self.listen_interval = 1
+        self.listen_interval = 0.1
         """Interval in second of listening"""
 
         # Data related configs
@@ -96,6 +100,9 @@ class EEGStreamer:
         print('Time \t \t Patient \t Event ')
 
         self.consumer.subscribe([self.consumer_topic])
+        # Roll to the latest topic
+        self.consumer.poll(5)
+        self.consumer.seek(TopicPartition(self.consumer_topic, 0, OFFSET_END))
 
         # read in txt files, fake a stream data
         ds = np.tile(np.loadtxt(self.__infile, delimiter=','), [1, 10])
@@ -113,7 +120,7 @@ class EEGStreamer:
                                   range(0, np.shape(ds)[0])])
             timestamp = time()
             value = "{'t':%.6f,'v':[" % float(timestamp) + joint_str + "]}"
-            self.producer.produce(self.producer_topic, key=montage, value=value)
+            self.producer.produce(self.producer_topic, key=self.streamer_id, value=value)
 
             # Flush after given interval
             intv = int(self.flush_interval * self.streaming_rate)
@@ -144,18 +151,18 @@ class EEGStreamer:
         #     print(timestamp, "not sync'ed. check network connection.")
         # else:
         #     print(timestamp, "all good")
+
         msg = self.consumer.poll(0.1)
+
         if msg is None:
             pass
         elif not msg.error():
             print(f"Received message: key={msg.key().decode('utf-8')} val={msg.value()}") if self.__verbose else None
-            if msg.key().decode('utf-8') != 'key':
+            # Sanity check
+            if msg.key().decode('utf-8') != self.streamer_id:
                 return None
-            # TODO: if msg.key() == XXX
             t, v = self.decode(msg.key(), msg.value())
             t = datetime.fromtimestamp(int(t)).time().strftime('%I:%M:%S %p')
-            # TODO: Check time stamp
-            # print(msg.key().decode('utf-8'))
             if v[0] == 'pres':
                 print(t, "\t", self.streamer_id, "\t", colored("!!seizure in 10~15 min!!", 'red'))
             elif v[0] == 'bckg':
@@ -222,7 +229,9 @@ class EEGStreamer:
             except ValueError:
                 sampling_delay = 0
                 print(
-                    "WARNING: NEW DELAY TIME INTERVAL WAS A NEGATIVE NUMBER. Setting to 0..")
+                    "WARNING: NEW DELAY TIME INTERVAL WAS A NEGATIVE NUMBER. "
+                    "Setting to 0.."
+                ) if self.__verbose else None
             print(f"Deviation: {deviation:.2f} ms, new delay:"
                   f" {sampling_delay * 1000:.2f} ms.") if self.__verbose else None
             sampling_count = 0
