@@ -1,0 +1,1 @@
+python EEGStreamer.py config.ini data/svdemo-5bkg-5pre-5bkg-5pre.txt -id Du_Fu
